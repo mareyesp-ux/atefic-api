@@ -1,16 +1,12 @@
 # ============================================================
 # ATEFIC API
-# Análisis prospectivo de tendencias científicas con Machine Learning
-# Versión con SUBCORPUS ORIENTADO POR RETO
+# Versión nube estable: SOLO EXCEL, SIN MATPLOTLIB, SIN IMÁGENES
 #
-# Uso local:
-# 1. Crear requirements.txt
-# 2. Crear entorno virtual
-# 3. Instalar dependencias
-# 4. Ejecutar:
-#    .\.venv\Scripts\python.exe -m uvicorn app:app --reload
-# 5. Abrir:
-#    http://127.0.0.1:8000
+# Ejecutar local:
+# .\.venv\Scripts\python.exe -m uvicorn app:app --reload
+#
+# Ejecutar en Render:
+# uvicorn app:app --host 0.0.0.0 --port $PORT
 # ============================================================
 
 from pathlib import Path
@@ -18,12 +14,10 @@ import html
 import re
 import textwrap
 import time
+import uuid
 import unicodedata
 import warnings
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -54,25 +48,20 @@ DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 ANIOS_COMPARACION = [2030, 2035, 2040]
-N_CLUSTERS = 10
 
-# Parámetros del subcorpus
-SUBCORPUS_MIN_DOCS = 35
-SUBCORPUS_MAX_DOCS = 160
-SUBCORPUS_FRACCION = 0.28
+# Para Render Free: mantener liviano
+N_CLUSTERS = 8
+SUBCORPUS_MIN_DOCS = 25
+SUBCORPUS_MAX_DOCS = 120
+SUBCORPUS_FRACCION = 0.25
+MAX_FEATURES_FILTRO = 3000
+MAX_FEATURES_CLUSTER = 3000
 
 
 # ============================================================
-# 2. COLORES
+# 2. COLORES EXCEL
 # ============================================================
 
-COLOR_AZUL_OSCURO = "#0B2545"
-COLOR_VERDE_FIG = "#0F766E"
-COLOR_NARANJA = "#F59E0B"
-COLOR_GRIS_FIG = "#64748B"
-COLOR_ROJO_FIG = "#DC2626"
-
-# Colores para Excel: sin #
 COLOR_HEADER = "0B2545"
 COLOR_BLANCO = "FFFFFF"
 COLOR_GRIS_CLARO = "F2F4F7"
@@ -82,11 +71,6 @@ COLOR_VERDE = "D9EAD3"
 COLOR_AMARILLO = "FFF2CC"
 COLOR_ROJO = "F4CCCC"
 COLOR_GRIS = "E7E6E6"
-
-# Colores para Matplotlib: con #
-COLOR_TEXTO_FIG = "#1F2937"
-
-plt.rcParams["font.family"] = "DejaVu Sans"
 
 
 # ============================================================
@@ -101,7 +85,8 @@ STOPWORDS_ES = [
     "tambien", "también", "estudio", "estudios", "analisis", "análisis",
     "investigacion", "investigación", "modelo", "modelos", "datos",
     "resultado", "resultados", "caso", "casos", "articulo", "artículo",
-    "futuro", "hacia", "colombia", "colombiano", "colombiana"
+    "futuro", "hacia", "colombia", "colombiano", "colombiana",
+    "sistema", "sector", "tema", "reto", "prospectivo", "prospectiva"
 ]
 
 STOPWORDS_ACADEMICAS = [
@@ -122,7 +107,7 @@ STOPWORDS_EXTRA = sorted(
 
 
 # ============================================================
-# 4. DICCIONARIO TEMÁTICO FLEXIBLE
+# 4. GRUPOS TEMÁTICOS FLEXIBLES
 # ============================================================
 
 GRUPOS_TEMATICOS = {
@@ -208,8 +193,8 @@ GRUPOS_TEMATICOS = {
 
 app = FastAPI(
     title="ATEFIC API",
-    description="Análisis prospectivo de tendencias científicas con Machine Learning.",
-    version="2.0.0"
+    description="Vigilancia científica con subcorpus orientado por reto. Versión solo Excel.",
+    version="3.0.0-excel-only"
 )
 
 app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
@@ -330,7 +315,7 @@ def inicio():
             </div>
 
             <div class="badge">
-                Versión con subcorpus orientado por reto
+                Versión nube estable · Solo Excel · Sin imágenes
             </div>
 
             <form action="/analizar-web" method="post" enctype="multipart/form-data">
@@ -344,7 +329,7 @@ def inicio():
             </form>
 
             <div class="ejemplos">
-                <strong>Ejemplos de retos que puedes probar:</strong>
+                <strong>Ejemplos de retos:</strong>
                 <ul>
                     <li>Transformación del control aduanero colombiano frente al contrabando técnico, la subfacturación comercial y las redes ilícitas transfronterizas hacia 2040.</li>
                     <li>Futuro de la fiscalización tributaria frente a la economía digital, las plataformas electrónicas y el uso de inteligencia artificial para la gestión del riesgo hacia 2040.</li>
@@ -354,7 +339,7 @@ def inicio():
             </div>
 
             <div class="nota">
-                La herramienta no analiza todo el corpus de la misma forma. Primero selecciona los documentos más afines al reto del grupo y luego construye tendencias sobre ese subcorpus.
+                La herramienta selecciona documentos afines al reto, construye un subcorpus, identifica tendencias y genera un Excel con tres hojas: Tendencias, Subcorpus y Parámetros.
             </div>
         </div>
     </body>
@@ -363,7 +348,7 @@ def inicio():
 
 
 # ============================================================
-# 7. ENDPOINTS WEB Y API
+# 7. ENDPOINTS
 # ============================================================
 
 @app.post("/analizar-web", response_class=HTMLResponse)
@@ -387,37 +372,31 @@ async def analizar_web(
                 "El archivo debe tener extensión .bib exportado desde Scopus."
             )
 
-        limpiar_carpeta(DATA_DIR)
-        limpiar_carpeta(OUTPUT_DIR)
+        job_id = crear_job_id()
+        data_job_dir = DATA_DIR / job_id
+        output_job_dir = OUTPUT_DIR / job_id
 
-        destino = DATA_DIR / "archivo_usuario.bib"
+        data_job_dir.mkdir(parents=True, exist_ok=True)
+        output_job_dir.mkdir(parents=True, exist_ok=True)
+
+        destino = data_job_dir / "corpus_maestro.bib"
         contenido = await archivo_bib.read()
 
         with open(destino, "wb") as f:
             f.write(contenido)
 
         inicio_tiempo = time.time()
-        resultado = ejecutar_analisis(reto)
+
+        resultado = ejecutar_analisis(
+            reto=reto,
+            ruta_bib=destino,
+            output_job_dir=output_job_dir
+        )
+
         duracion = round(time.time() - inicio_tiempo, 2)
 
         base_url = str(request.base_url).rstrip("/")
-        archivos = listar_archivos(base_url)
-
-        enlaces_html = ""
-        imagenes_html = ""
-
-        for archivo in archivos:
-            enlaces_html += f"""
-            <li>
-                <a href="{archivo['url']}" target="_blank">{archivo['nombre']}</a>
-            </li>
-            """
-
-            if archivo["nombre"].lower().endswith(".png"):
-                imagenes_html += f"""
-                <h4>{archivo['nombre']}</h4>
-                <img src="{archivo['url']}" style="width:100%; border:1px solid #cbd5e1; border-radius:12px; margin-bottom:25px;">
-                """
+        excel_url = f"{base_url}/output/{job_id}/ATEFIC_Tabla_Tendencias_ML.xlsx"
 
         return f"""
         <!DOCTYPE html>
@@ -449,19 +428,22 @@ async def analizar_web(
                     font-weight: bold;
                     color: #274E13;
                 }}
-                a {{
-                    color: #0B2545;
-                    font-weight: bold;
-                }}
-                li {{
-                    margin-bottom: 10px;
-                }}
                 .reto {{
                     background: #f8fafc;
                     padding: 14px;
                     border-radius: 10px;
                     border: 1px solid #cbd5e1;
                     margin-top: 12px;
+                }}
+                .descarga {{
+                    display: inline-block;
+                    background: #0B2545;
+                    color: white;
+                    padding: 14px 22px;
+                    border-radius: 10px;
+                    text-decoration: none;
+                    font-weight: bold;
+                    margin-top: 10px;
                 }}
                 pre {{
                     white-space: pre-wrap;
@@ -474,7 +456,7 @@ async def analizar_web(
                 .volver {{
                     display: inline-block;
                     margin-top: 25px;
-                    background: #0B2545;
+                    background: #64748B;
                     color: white;
                     padding: 12px 22px;
                     border-radius: 10px;
@@ -493,16 +475,13 @@ async def analizar_web(
                 <h3>Reto analizado</h3>
                 <div class="reto">{html.escape(reto)}</div>
 
-                <h3>Archivos descargables</h3>
-                <ul>
-                    {enlaces_html}
-                </ul>
+                <h3>Archivo generado</h3>
+                <a class="descarga" href="{excel_url}" target="_blank">
+                    Descargar Excel ATEFIC
+                </a>
 
                 <h3>Vista previa del análisis</h3>
                 <pre>{html.escape(resultado)}</pre>
-
-                <h3>Figuras generadas</h3>
-                {imagenes_html}
 
                 <a class="volver" href="/">Ejecutar otro análisis</a>
             </div>
@@ -516,27 +495,40 @@ async def analizar_web(
 
 @app.post("/analizar")
 async def analizar_api(
+    request: Request,
     reto: str = Form(...),
     archivo_bib: UploadFile = File(...)
 ):
     try:
         reto = reto.strip()
 
-        limpiar_carpeta(DATA_DIR)
-        limpiar_carpeta(OUTPUT_DIR)
+        job_id = crear_job_id()
+        data_job_dir = DATA_DIR / job_id
+        output_job_dir = OUTPUT_DIR / job_id
 
-        destino = DATA_DIR / "archivo_usuario.bib"
+        data_job_dir.mkdir(parents=True, exist_ok=True)
+        output_job_dir.mkdir(parents=True, exist_ok=True)
+
+        destino = data_job_dir / "corpus_maestro.bib"
         contenido = await archivo_bib.read()
 
         with open(destino, "wb") as f:
             f.write(contenido)
 
-        resumen = ejecutar_analisis(reto)
+        resumen = ejecutar_analisis(
+            reto=reto,
+            ruta_bib=destino,
+            output_job_dir=output_job_dir
+        )
+
+        base_url = str(request.base_url).rstrip("/")
+        excel_url = f"{base_url}/output/{job_id}/ATEFIC_Tabla_Tendencias_ML.xlsx"
 
         return {
             "status": "ok",
+            "job_id": job_id,
             "reto": reto,
-            "archivos": [archivo.name for archivo in OUTPUT_DIR.glob("*") if archivo.is_file()],
+            "excel_url": excel_url,
             "resumen": resumen
         }
 
@@ -548,7 +540,7 @@ async def analizar_api(
 def health():
     return {
         "status": "ok",
-        "version": "2.0.0-subcorpus-orientado-por-reto",
+        "version": "3.0.0-excel-only-no-matplotlib",
         "data_dir": str(DATA_DIR),
         "output_dir": str(OUTPUT_DIR)
     }
@@ -609,7 +601,7 @@ def pagina_error(titulo, detalle):
             <h1>ATEFIC · Error</h1>
             <div class="error">{html.escape(titulo)}</div>
             <h3>Detalle técnico</h3>
-            <pre>{html.escape(detalle)}</pre>
+            <pre>{html.escape(str(detalle))}</pre>
             <a href="/">Volver al formulario</a>
         </div>
     </body>
@@ -618,31 +610,11 @@ def pagina_error(titulo, detalle):
 
 
 # ============================================================
-# 8. UTILIDADES
+# 8. UTILIDADES GENERALES
 # ============================================================
 
-def limpiar_carpeta(carpeta):
-    carpeta.mkdir(exist_ok=True)
-
-    for archivo in carpeta.glob("*"):
-        if archivo.is_file():
-            try:
-                archivo.unlink()
-            except Exception:
-                pass
-
-
-def listar_archivos(base_url):
-    archivos = []
-
-    for archivo in sorted(OUTPUT_DIR.glob("*")):
-        if archivo.is_file():
-            archivos.append({
-                "nombre": archivo.name,
-                "url": f"{base_url}/output/{archivo.name}"
-            })
-
-    return archivos
+def crear_job_id():
+    return "job_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
 
 
 def quitar_tildes(texto):
@@ -659,11 +631,7 @@ def normalizar(texto):
     return texto
 
 
-def envolver_texto(texto, ancho=38):
-    return "\n".join(textwrap.wrap(str(texto), width=ancho))
-
-
-def recortar_texto(texto, max_caracteres=95):
+def recortar_texto(texto, max_caracteres=120):
     texto = str(texto)
 
     if len(texto) <= max_caracteres:
@@ -704,14 +672,7 @@ def extraer_campo_bibtex(registro, campo):
     return ""
 
 
-def leer_bibtex():
-    archivos = sorted(DATA_DIR.glob("*.bib"))
-
-    if not archivos:
-        raise ValueError("No hay archivo .bib cargado.")
-
-    ruta_bib = archivos[0]
-
+def leer_bibtex_desde_ruta(ruta_bib):
     with open(ruta_bib, "r", encoding="utf-8", errors="ignore") as f:
         contenido = f.read()
 
@@ -790,7 +751,7 @@ def leer_bibtex():
     if df.empty:
         raise ValueError("El archivo no tiene texto suficiente para analizar.")
 
-    return df, ruta_bib
+    return df
 
 
 # ============================================================
@@ -808,10 +769,7 @@ def presencia_terminos(texto, terminos):
     for termino in terminos:
         termino_norm = normalizar(termino)
 
-        if not termino_norm:
-            continue
-
-        if termino_norm in texto:
+        if termino_norm and termino_norm in texto:
             conteo += texto.count(termino_norm)
 
     return min(1.0, conteo / 4)
@@ -845,20 +803,14 @@ def perfil_reto(reto):
 
 
 def construir_consulta_expandida(reto):
-    """
-    Convierte el reto del grupo en una consulta semántica ampliada.
-    No necesita conocer previamente el reto.
-    Usa el texto del reto y activa vocabulario relacionado.
-    """
-
     reto_norm = normalizar(reto)
     pesos = perfil_reto(reto_norm)
 
     terminos_extra = []
 
     for grupo, peso in pesos.items():
-        if peso >= 0.18:
-            terminos_extra.extend(GRUPOS_TEMATICOS.get(grupo, [])[:22])
+        if peso >= 0.16:
+            terminos_extra.extend(GRUPOS_TEMATICOS.get(grupo, [])[:18])
 
     consulta = reto_norm + " " + " ".join(terminos_extra)
 
@@ -866,23 +818,15 @@ def construir_consulta_expandida(reto):
 
 
 def calcular_score_documento_reto(df, reto):
-    """
-    Calcula la afinidad de cada documento con el reto.
-    Combina:
-    1. Similitud TF-IDF entre reto expandido y documento.
-    2. Cobertura de términos relevantes.
-    3. Coincidencia del perfil temático del reto.
-    """
-
     consulta = construir_consulta_expandida(reto)
     textos = df["texto_limpio"].fillna("").astype(str).tolist()
 
     try:
         vectorizer = TfidfVectorizer(
             stop_words=STOPWORDS_EXTRA,
-            ngram_range=(1, 3),
+            ngram_range=(1, 2),
             min_df=1,
-            max_features=7000
+            max_features=MAX_FEATURES_FILTRO
         )
 
         matriz = vectorizer.fit_transform([consulta] + textos)
@@ -927,12 +871,6 @@ def calcular_score_documento_reto(df, reto):
 
 
 def filtrar_documentos_por_reto(df, reto):
-    """
-    Construye el subcorpus de análisis para cada grupo.
-    Este es el cambio clave: el clustering ya no se hace sobre todo el .bib,
-    sino sobre los documentos más relacionados con el reto escrito.
-    """
-
     df = df.copy()
     n_total = len(df)
 
@@ -955,29 +893,27 @@ def filtrar_documentos_por_reto(df, reto):
 
     subcorpus = df.head(top_k).copy()
 
-    # Si el corpus es grande, elimina documentos con afinidad casi nula,
-    # siempre que no destruya el mínimo necesario.
     if n_total > SUBCORPUS_MIN_DOCS:
-        filtrado_positivo = subcorpus[subcorpus["score_reto"] > 0.01].copy()
+        filtrado = subcorpus[subcorpus["score_reto"] > 0.005].copy()
 
-        if len(filtrado_positivo) >= max(15, min(SUBCORPUS_MIN_DOCS, top_k)):
-            subcorpus = filtrado_positivo
-
-    info = {
-        "documentos_corpus_maestro": int(n_total),
-        "documentos_subcorpus": int(len(subcorpus)),
-        "porcentaje_subcorpus": round((len(subcorpus) / n_total) * 100, 2),
-        "score_max": round(float(subcorpus["score_reto"].max()), 4) if len(subcorpus) > 0 else 0,
-        "score_min": round(float(subcorpus["score_reto"].min()), 4) if len(subcorpus) > 0 else 0,
-        "score_promedio": round(float(subcorpus["score_reto"].mean()), 4) if len(subcorpus) > 0 else 0,
-        "consulta_expandida": consulta
-    }
+        if len(filtrado) >= max(12, min(SUBCORPUS_MIN_DOCS, top_k)):
+            subcorpus = filtrado
 
     if len(subcorpus) < 2:
         raise ValueError(
             "El reto produjo un subcorpus demasiado pequeño. "
             "Prueba con un reto más amplio o carga un corpus maestro más grande."
         )
+
+    info = {
+        "documentos_corpus_maestro": int(n_total),
+        "documentos_subcorpus": int(len(subcorpus)),
+        "porcentaje_subcorpus": round((len(subcorpus) / n_total) * 100, 2),
+        "score_max": round(float(subcorpus["score_reto"].max()), 4),
+        "score_min": round(float(subcorpus["score_reto"].min()), 4),
+        "score_promedio": round(float(subcorpus["score_reto"].mean()), 4),
+        "consulta_expandida": consulta
+    }
 
     return subcorpus, info
 
@@ -987,17 +923,11 @@ def filtrar_documentos_por_reto(df, reto):
 # ============================================================
 
 def afinidad_con_reto(reto, texto_tendencia, texto_cluster=""):
-    """
-    Afinidad del clúster con el reto.
-    Aquí ya trabajamos sobre un subcorpus filtrado,
-    pero esta afinidad ayuda a ordenar y calcular IRP.
-    """
-
     reto_norm = normalizar(reto)
     tendencia_norm = normalizar(texto_tendencia)
-    cluster_norm = normalizar(texto_cluster[:12000])
+    cluster_norm = normalizar(texto_cluster[:10000])
 
-    texto_base = f"{tendencia_norm} {tendencia_norm} {tendencia_norm} {cluster_norm}"
+    texto_base = f"{tendencia_norm} {tendencia_norm} {cluster_norm}"
 
     pesos_reto = perfil_reto(reto_norm)
 
@@ -1011,9 +941,9 @@ def afinidad_con_reto(reto, texto_tendencia, texto_cluster=""):
 
         vectorizer = TfidfVectorizer(
             stop_words=STOPWORDS_EXTRA,
-            ngram_range=(1, 3),
+            ngram_range=(1, 2),
             min_df=1,
-            max_features=3000
+            max_features=2000
         )
 
         matriz = vectorizer.fit_transform([consulta, texto_base])
@@ -1157,7 +1087,7 @@ def nombre_generico_cluster(terminos_top):
 
 def nombrar_cluster(texto_cluster, terminos_top):
     top = " ".join(terminos_top).lower()
-    muestra = texto_cluster.lower()[:70000]
+    muestra = texto_cluster.lower()[:50000]
     combinado = top + " " + muestra
 
     mejor_nombre = None
@@ -1204,16 +1134,16 @@ def hacer_nombre_unico(base, terminos_top, usados):
 # ============================================================
 
 def clasificar_madurez(n_docs, recent_share, total_docs):
-    if n_docs >= max(40, total_docs * 0.18):
+    if n_docs >= max(30, total_docs * 0.18):
         return "Tendencia consolidada en el subcorpus"
 
-    if n_docs >= 15 and recent_share >= 0.42:
+    if n_docs >= 10 and recent_share >= 0.42:
         return "Tendencia emergente"
 
-    if n_docs < 15 and recent_share >= 0.42:
+    if n_docs < 10 and recent_share >= 0.42:
         return "Señal débil"
 
-    if n_docs >= 15:
+    if n_docs >= 10:
         return "Tema de monitoreo"
 
     return "Hipótesis a validar"
@@ -1230,19 +1160,6 @@ def clasificar_relevancia_prospectiva(irp):
         return "Señal prospectiva consolidada"
 
     return "Señal débil en vigilancia"
-
-
-def etiqueta_corta(irp):
-    if irp >= 0.78:
-        return "Crítica"
-
-    if irp >= 0.62:
-        return "Alta"
-
-    if irp >= 0.48:
-        return "Consolidada"
-
-    return "Vigilancia"
 
 
 def impacto_desde_irp(irp):
@@ -1284,10 +1201,10 @@ def construir_vectorizador(textos):
     for params in intentos:
         try:
             vectorizer = TfidfVectorizer(
-                max_features=4500,
+                max_features=MAX_FEATURES_CLUSTER,
                 min_df=params["min_df"],
                 max_df=params["max_df"],
-                ngram_range=(1, 3),
+                ngram_range=(1, 2),
                 stop_words=STOPWORDS_EXTRA
             )
 
@@ -1341,7 +1258,7 @@ def construir_clusters(df, reto):
     modelo = KMeans(
         n_clusters=n_clusters,
         random_state=42,
-        n_init=20
+        n_init=8
     )
 
     df["cluster"] = modelo.fit_predict(matriz_tfidf)
@@ -1359,7 +1276,7 @@ def construir_clusters(df, reto):
         sub = df[df["cluster"] == cluster_id].copy()
 
         centro = modelo.cluster_centers_[cluster_id]
-        top_idx = centro.argsort()[::-1][:18]
+        top_idx = centro.argsort()[::-1][:15]
         terminos_top = terminos[top_idx].tolist()
 
         texto_cluster = " ".join(sub["texto_limpio"].tolist())
@@ -1535,7 +1452,6 @@ def construir_proyeccion(df, clusters):
                 "tendencia": row["tendencia"],
                 "irp": round(float(irp), 3),
                 "clasificacion": clasificar_relevancia_prospectiva(irp),
-                "etiqueta": etiqueta_corta(irp),
                 "documentos_proyectados": round(float(row["documentos_proyectados"]), 3),
                 "pendiente_crecimiento": round(float(row["pendiente_crecimiento"]), 5),
                 "r2_tendencia": round(float(row["r2_tendencia"]), 3),
@@ -1649,12 +1565,14 @@ def construir_tabla_subcorpus(df_sub):
 # 16. EXCEL
 # ============================================================
 
-def exportar_excel(tabla_tendencias, tabla_subcorpus, reto, ruta_bib, parametros, info_subcorpus):
-    ruta_excel = OUTPUT_DIR / "ATEFIC_Tabla_Tendencias_ML.xlsx"
+def exportar_excel(tabla_tendencias, tabla_subcorpus, reto, ruta_bib, parametros, info_subcorpus, output_job_dir):
+    output_job_dir.mkdir(parents=True, exist_ok=True)
+
+    ruta_excel = output_job_dir / "ATEFIC_Tabla_Tendencias_ML.xlsx"
 
     parametros_df = pd.DataFrame([
         ["Reto analizado", reto],
-        ["Archivo fuente", str(ruta_bib)],
+        ["Archivo fuente", str(ruta_bib.name)],
         ["Documentos del corpus maestro", info_subcorpus["documentos_corpus_maestro"]],
         ["Documentos seleccionados en el subcorpus", info_subcorpus["documentos_subcorpus"]],
         ["Porcentaje del corpus usado", f"{info_subcorpus['porcentaje_subcorpus']}%"],
@@ -1692,7 +1610,7 @@ def estilizar_hoja(ws, nombre_hoja):
 
     ws.merge_cells(f"A1:{final_col}1")
     ws["A1"] = f"ATEFIC · {nombre_hoja}"
-    ws["A1"].font = Font(name="Cambria", size=16, bold=True, color=COLOR_AZUL_OSCURO.replace("#", ""))
+    ws["A1"].font = Font(name="Cambria", size=16, bold=True, color=COLOR_HEADER)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 30
 
@@ -1721,7 +1639,7 @@ def estilizar_hoja(ws, nombre_hoja):
 
     for col in range(1, ws.max_column + 1):
         letra = get_column_letter(col)
-        ws.column_dimensions[letra].width = 32
+        ws.column_dimensions[letra].width = 30
 
     ws.column_dimensions["A"].width = 52
     ws.column_dimensions["B"].width = 62
@@ -1731,338 +1649,11 @@ def estilizar_hoja(ws, nombre_hoja):
 
 
 # ============================================================
-# 17. FIGURAS
+# 17. EJECUCIÓN GENERAL
 # ============================================================
 
-def extraer_irp(valor):
-    match = re.search(r"IRP=(\d+\.\d+)", str(valor))
-    if match:
-        return float(match.group(1))
-    return 0.0
-
-
-def preparar_df_figuras(tabla):
-    df = tabla.copy()
-    df["IRP_2030"] = df["2030"].apply(extraer_irp)
-    df["IRP_2035"] = df["2035"].apply(extraer_irp)
-    df["IRP_2040"] = df["2040"].apply(extraer_irp)
-    df["Cambio_2030_2040"] = df["IRP_2040"] - df["IRP_2030"]
-    df["Promedio_IRP"] = df[["IRP_2030", "IRP_2035", "IRP_2040"]].mean(axis=1)
-    return df
-
-
-def color_por_irp(valor):
-    if valor >= 0.78:
-        return COLOR_ROJO_FIG
-    if valor >= 0.62:
-        return COLOR_VERDE_FIG
-    if valor >= 0.48:
-        return COLOR_NARANJA
-    return COLOR_GRIS_FIG
-
-
-def generar_mapa_calor(tabla):
-    df = preparar_df_figuras(tabla)
-    heat = df.sort_values("Promedio_IRP", ascending=False).head(10)
-
-    matriz = heat.set_index("Tendencia identificada")[["IRP_2030", "IRP_2035", "IRP_2040"]]
-    matriz.columns = ["2030", "2035", "2040"]
-
-    fig, ax = plt.subplots(figsize=(18, 10))
-
-    im = ax.imshow(matriz.values, aspect="auto", cmap="YlOrRd", vmin=0, vmax=1)
-
-    ax.set_xticks(range(len(matriz.columns)))
-    ax.set_xticklabels(matriz.columns, fontsize=13, weight="bold")
-
-    etiquetas_y = [
-        envolver_texto(recortar_texto(x, 92), 42)
-        for x in matriz.index
-    ]
-
-    ax.set_yticks(range(len(matriz.index)))
-    ax.set_yticklabels(etiquetas_y, fontsize=9)
-
-    ax.set_xlabel("Año horizonte")
-    ax.set_ylabel("Tendencia científica identificada")
-
-    ax.set_title(
-        "ATEFIC · Mapa de calor prospectivo sobre subcorpus orientado por reto",
-        fontsize=18,
-        weight="bold",
-        color=COLOR_AZUL_OSCURO,
-        pad=18
-    )
-
-    for i in range(matriz.shape[0]):
-        for j in range(matriz.shape[1]):
-            valor = matriz.iloc[i, j]
-            etiqueta = etiqueta_corta(valor)
-            color_texto = "white" if valor >= 0.62 else COLOR_AZUL_OSCURO
-
-            ax.text(
-                j,
-                i,
-                f"{etiqueta}\nIRP={valor:.2f}",
-                ha="center",
-                va="center",
-                fontsize=9,
-                color=color_texto,
-                weight="bold"
-            )
-
-    ax.set_xticks(np.arange(-0.5, matriz.shape[1], 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, matriz.shape[0], 1), minor=True)
-    ax.grid(which="minor", color="white", linestyle="-", linewidth=1.2)
-    ax.tick_params(which="minor", bottom=False, left=False)
-
-    cbar = fig.colorbar(im, ax=ax, fraction=0.032, pad=0.035)
-    cbar.set_label("Índice de Relevancia Prospectiva", fontsize=10)
-
-    fig.text(
-        0.12,
-        0.045,
-        "Convención: Crítica ≥ 0.78 | Alta ≥ 0.62 | Consolidada ≥ 0.48 | Vigilancia < 0.48",
-        fontsize=10,
-        color=COLOR_AZUL_OSCURO,
-        weight="bold"
-    )
-
-    fig.text(
-        0.12,
-        0.020,
-        "Nota: primero se seleccionan documentos afines al reto y luego se identifican tendencias con TF-IDF, K-Means e IRP.",
-        fontsize=8.5,
-        color="#475569"
-    )
-
-    plt.tight_layout(rect=[0.04, 0.08, 0.94, 0.95])
-
-    ruta = OUTPUT_DIR / "ATEFIC_01_mapa_calor_prospectivo_ML.png"
-    plt.savefig(ruta, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    return ruta
-
-
-def generar_ranking(tabla):
-    df = preparar_df_figuras(tabla)
-    top = df.sort_values("IRP_2030", ascending=True).tail(10)
-
-    fig, ax = plt.subplots(figsize=(18, 10))
-
-    y = np.arange(len(top))
-    colores = [color_por_irp(v) for v in top["IRP_2030"]]
-
-    ax.barh(y, top["IRP_2030"], color=colores, edgecolor=COLOR_AZUL_OSCURO)
-
-    ax.set_yticks(y)
-    ax.set_yticklabels(
-        [envolver_texto(recortar_texto(x, 100), 50) for x in top["Tendencia identificada"]],
-        fontsize=9
-    )
-
-    ax.set_xlabel("Índice de Relevancia Prospectiva 2030")
-    ax.set_title(
-        "ATEFIC · Priorización de tendencias hacia 2030",
-        fontsize=17,
-        weight="bold",
-        color=COLOR_AZUL_OSCURO
-    )
-
-    ax.set_xlim(0, max(1.0, top["IRP_2030"].max() + 0.08))
-    ax.grid(axis="x", linestyle="--", alpha=0.25)
-
-    for i, (_, row) in enumerate(top.iterrows()):
-        ax.text(
-            row["IRP_2030"] + 0.01,
-            i,
-            f"IRP={row['IRP_2030']:.2f}",
-            va="center",
-            fontsize=9,
-            color=COLOR_AZUL_OSCURO,
-            weight="bold"
-        )
-
-    plt.tight_layout()
-
-    ruta = OUTPUT_DIR / "ATEFIC_02_ranking_IRP_2030.png"
-    plt.savefig(ruta, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    return ruta
-
-
-def generar_lectura(tabla):
-    df = preparar_df_figuras(tabla)
-    top = df.sort_values("Promedio_IRP", ascending=False).head(10)
-
-    fig, ax = plt.subplots(figsize=(16, 10))
-    ax.axis("off")
-
-    ax.text(
-        0.03,
-        0.96,
-        "ATEFIC · Lectura prospectiva de tendencias 2030–2040",
-        fontsize=18,
-        weight="bold",
-        color=COLOR_AZUL_OSCURO,
-        ha="left",
-        va="top"
-    )
-
-    ax.text(
-        0.03,
-        0.91,
-        "Síntesis interpretativa del cambio proyectado del Índice de Relevancia Prospectiva.",
-        fontsize=11,
-        color="#475569",
-        ha="left",
-        va="top"
-    )
-
-    y = 0.84
-
-    for idx, (_, row) in enumerate(top.iterrows(), start=1):
-        cambio = row["Cambio_2030_2040"]
-        promedio = row["Promedio_IRP"]
-
-        if cambio > 0.05:
-            direccion = "gana relevancia hacia 2040"
-        elif cambio < -0.05:
-            direccion = "pierde intensidad relativa hacia 2040"
-        else:
-            direccion = "permanece relativamente estable"
-
-        tendencia = envolver_texto(row["Tendencia identificada"], 105)
-
-        texto = (
-            f"{idx}. {tendencia}\n"
-            f"   Promedio IRP={promedio:.2f}; cambio 2030–2040={cambio:+.2f}; {direccion}."
-        )
-
-        ax.text(
-            0.05,
-            y,
-            texto,
-            fontsize=10,
-            color=COLOR_TEXTO_FIG,
-            ha="left",
-            va="top",
-            linespacing=1.3
-        )
-
-        y -= 0.075
-
-    ax.text(
-        0.03,
-        0.06,
-        "Nota: esta lectura se deriva del subcorpus seleccionado según el reto ingresado.",
-        fontsize=9,
-        color="#64748B",
-        ha="left"
-    )
-
-    plt.tight_layout()
-
-    ruta = OUTPUT_DIR / "ATEFIC_03_lectura_prospectiva_2030_2040.png"
-    plt.savefig(ruta, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    return ruta
-
-
-def generar_matriz_cambio(tabla):
-    df = preparar_df_figuras(tabla)
-    plot = df.sort_values("Promedio_IRP", ascending=False).head(10).copy()
-    plot["Orden"] = range(1, len(plot) + 1)
-
-    fig, ax = plt.subplots(figsize=(17, 10))
-
-    tamanos = 600 + plot["Promedio_IRP"] * 2000
-    colores = [color_por_irp(v) for v in plot["IRP_2040"]]
-
-    ax.scatter(
-        plot["IRP_2030"],
-        plot["Cambio_2030_2040"],
-        s=tamanos,
-        c=colores,
-        alpha=0.78,
-        edgecolor=COLOR_AZUL_OSCURO,
-        linewidth=0.8
-    )
-
-    for _, row in plot.iterrows():
-        ax.text(
-            row["IRP_2030"],
-            row["Cambio_2030_2040"],
-            str(row["Orden"]),
-            ha="center",
-            va="center",
-            fontsize=11,
-            weight="bold",
-            color="white"
-        )
-
-    ax.axhline(0, color=COLOR_GRIS_FIG, linestyle="--", alpha=0.45)
-    ax.axvline(plot["IRP_2030"].median(), color=COLOR_GRIS_FIG, linestyle="--", alpha=0.35)
-
-    ax.set_xlabel("IRP 2030")
-    ax.set_ylabel("Cambio proyectado del IRP entre 2030 y 2040")
-    ax.set_title(
-        "ATEFIC · Matriz de cambio prospectivo 2030–2040",
-        fontsize=17,
-        weight="bold",
-        color=COLOR_AZUL_OSCURO
-    )
-
-    ax.grid(alpha=0.18)
-
-    leyenda = "Leyenda de tendencias:\n"
-    for _, row in plot.iterrows():
-        leyenda += f"{row['Orden']}. {recortar_texto(row['Tendencia identificada'], 70)}\n"
-
-    ax.text(
-        1.02,
-        0.98,
-        leyenda,
-        transform=ax.transAxes,
-        fontsize=8.5,
-        va="top",
-        ha="left",
-        bbox=dict(boxstyle="round,pad=0.5", fc="white", ec="#CBD5E1", alpha=0.95)
-    )
-
-    fig.text(
-        0.10,
-        0.03,
-        "Lectura: las burbujas con mayor altura ganan relevancia hacia 2040; las ubicadas a la derecha ya son relevantes en 2030.",
-        fontsize=9,
-        color="#475569"
-    )
-
-    plt.tight_layout(rect=[0.03, 0.06, 0.82, 0.95])
-
-    ruta = OUTPUT_DIR / "ATEFIC_04_matriz_cambio_IRP_2030_2040.png"
-    plt.savefig(ruta, dpi=300, bbox_inches="tight")
-    plt.close()
-
-    return ruta
-
-
-def generar_figuras(tabla):
-    generar_mapa_calor(tabla)
-    generar_ranking(tabla)
-    generar_lectura(tabla)
-    generar_matriz_cambio(tabla)
-
-
-# ============================================================
-# 18. EJECUCIÓN GENERAL
-# ============================================================
-
-def ejecutar_analisis(reto):
-    df_maestro, ruta_bib = leer_bibtex()
+def ejecutar_analisis(reto, ruta_bib, output_job_dir):
+    df_maestro = leer_bibtex_desde_ruta(ruta_bib)
 
     df_subcorpus, info_subcorpus = filtrar_documentos_por_reto(df_maestro, reto)
 
@@ -2085,10 +1676,9 @@ def ejecutar_analisis(reto):
         reto=reto,
         ruta_bib=ruta_bib,
         parametros=parametros,
-        info_subcorpus=info_subcorpus
+        info_subcorpus=info_subcorpus,
+        output_job_dir=output_job_dir
     )
-
-    # generar_figuras(tabla_tendencias)
 
     resumen = ""
     resumen += "METODOLOGÍA APLICADA\n"
