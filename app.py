@@ -2088,7 +2088,7 @@ def ejecutar_analisis(reto):
         info_subcorpus=info_subcorpus
     )
 
-    generar_figuras(tabla_tendencias)
+    # generar_figuras(tabla_tendencias)
 
     resumen = ""
     resumen += "METODOLOGÍA APLICADA\n"
